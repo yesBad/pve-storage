@@ -1,6 +1,6 @@
 This repository has been tested with Intel® Optane™ Persistent Memory 100 Series 128GB modules on a HPE DL360GEN10 using 2x Xeon Platinum 8259CL
 
-![image](https://img.fish/d5c736.png)
+![image](https://img.fish/4478fe.png)
 
 ## build instructions
 install deps: `apt install git build-essential debhelper-compat libtest-mockmodule-perl lintian pve-doc-generator -y`
