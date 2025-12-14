@@ -22,7 +22,7 @@ sector mode
 
 fsdax mode
 } elsif ($dev =~ m|^/dev/pmem\d+$|) {
-    return "${dev}$partnum";
+    return "${dev}p$partnum";
 }
 
 *save*
