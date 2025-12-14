@@ -13,8 +13,15 @@ First shell -> exit
 
 nano /usr/share/perl5/Proxmox/Sys/Block.pm
 
-CTRL + F -> nvme - then add:
+CTRL + F -> nvme - then either add:
+
+sector mode 
 } elsif ($dev =~ m|^/dev/pmem\d+s$|) {
+    return "${dev}$partnum";
+}
+
+fsdax mode
+} elsif ($dev =~ m|^/dev/pmem\d+$|) {
     return "${dev}$partnum";
 }
 
