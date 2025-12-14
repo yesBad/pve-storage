@@ -2,7 +2,7 @@ This repository has been tested with Intel® Optane™ Persistent Memory 100 Ser
 
 ![image](https://img.fish/4478fe.png)
 
-## build instructions
+## patch instructions
 install deps: `apt install git build-essential debhelper-compat libtest-mockmodule-perl lintian pve-doc-generator -y`
 
 clone repo: `git clone https://github.com/yesBad/pve-storage && cd pve-storage`
