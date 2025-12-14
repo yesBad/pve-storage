@@ -561,11 +561,14 @@ sub get_disks {
             # - vdX         virtIO block device
             # - xvdX:       xen virtual block device
             # - nvmeXnY:    nvme devices
+            # - pmemXs:     pmem sector mode
+            # - pmemX:      pmem fsdax mode
             # - cciss!cXnY  cciss devices
             return
                 if $dev !~ m/^(h|s|x?v)d[a-z]+$/
                 && $dev !~ m/^nvme\d+n\d+$/
                 && $dev !~ m/^pmem\d+s$/
+                && $dev !~ m/^pmem\d+$/
                 && $dev !~ m/^cciss\!c\d+d\d+$/;
 
             my $data = get_udev_info("/sys/block/$dev") // return;
@@ -584,7 +587,8 @@ sub get_disks {
             if ($sysdata->{rotational} == 0) {
                 $type = 'ssd';
                 $type = 'nvme' if $dev =~ m/^nvme\d+n\d+$/;
-                $type = 'PMEM' if $dev =~ m/^pmem\d+s$/;
+                $type = 'PMEM-SECTOR' if $dev =~ m/^pmem\d+s$/;
+                $type = 'PMEM-FSDAX' if $dev =~ m/^pmem\d+$/;
                 $data->{rpm} = 0;
             } elsif ($sysdata->{rotational} == 1) {
                 if ($data->{rpm} != -1) {
