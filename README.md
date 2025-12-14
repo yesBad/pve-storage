@@ -1,3 +1,5 @@
+This repository has been tested with Intel® Optane™ Persistent Memory 100 Series 128GB modules on a HPE DL360GEN10 using 2x Xeon Platinum 8259CL
+
 ![image](https://img.fish/d5c736.png)
 
 ## build instructions
@@ -58,5 +60,5 @@ update-initramfs -k all -u
 exit
 umount -R /target/boot/efi
 umount -R /target/
-reboot
+exit
 ```
