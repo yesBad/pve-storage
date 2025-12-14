@@ -31,8 +31,12 @@ exit
 *Do installer as normal*
 
 mkdir /target
+
+*mounts will be different based on lvm/names/such*
 mount /dev/mapper/pve-root /target
 mount /dev/pmem0s2 /target/boot/efi
+*                                                *
+
 mount --bind /dev /target/dev
 mount --bind /proc /target/proc
 mount --bind /sys /target/sys
