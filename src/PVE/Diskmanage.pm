@@ -565,6 +565,7 @@ sub get_disks {
             return
                 if $dev !~ m/^(h|s|x?v)d[a-z]+$/
                 && $dev !~ m/^nvme\d+n\d+$/
+                && $dev !~ m/^pmem\d+s$/
                 && $dev !~ m/^cciss\!c\d+d\d+$/;
 
             my $data = get_udev_info("/sys/block/$dev") // return;
@@ -583,6 +584,7 @@ sub get_disks {
             if ($sysdata->{rotational} == 0) {
                 $type = 'ssd';
                 $type = 'nvme' if $dev =~ m/^nvme\d+n\d+$/;
+                $type = 'PMEM' if $dev =~ m/^pmem\d+s$/;
                 $data->{rpm} = 0;
             } elsif ($sysdata->{rotational} == 1) {
                 if ($data->{rpm} != -1) {
