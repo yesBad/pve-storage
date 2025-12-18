@@ -16,14 +16,14 @@ First shell -> exit
 
 nano /usr/share/perl5/Proxmox/Sys/Block.pm
 
-CTRL + F -> nvme - then either add:
+CTRL + F -> nvme - then add either or:
 
-sector mode 
+#sector mode 
 } elsif ($dev =~ m|^/dev/pmem\d+s$|) {
     return "${dev}$partnum";
 }
 
-fsdax mode
+#fsdax mode
 } elsif ($dev =~ m|^/dev/pmem\d+$|) {
     return "${dev}p$partnum";
 }
@@ -35,7 +35,8 @@ exit
 
 mkdir /target
 
-*mounts will be different based on lvm/names/such*
+* mounts will be different based on lvm/names/such *
+* if using zfs examples; zpool import rpool, zfs set mountpoint=/target rpool/ROOT/pve-1 *
 mount /dev/mapper/pve-root /target
 mount /dev/pmem0s2 /target/boot/efi
 *                                                *
