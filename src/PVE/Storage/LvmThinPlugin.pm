@@ -5,10 +5,11 @@ use warnings;
 
 use IO::File;
 
+use PVE::JSONSchema qw(get_standard_option);
 use PVE::Tools qw(run_command trim);
+
 use PVE::Storage::Plugin;
 use PVE::Storage::LVMPlugin;
-use PVE::JSONSchema qw(get_standard_option);
 
 # see: man lvmthin
 # lvcreate -n ThinDataLV -L LargeSize VG
@@ -477,7 +478,7 @@ sub volume_import {
             $with_snapshots,
             $allow_rename,
         );
-        ($storeid, my $newname) = PVE::Storage::parse_volume_id($newvolid);
+        ($storeid, my $newname) = PVE::Storage::Plugin::parse_volume_id($newvolid);
 
         $volname = $class->create_base($storeid, $scfg, $newname);
     }
