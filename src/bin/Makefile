@@ -33,4 +33,5 @@ install: pvesm.1 pvesm.bash-completion pvesm.zsh-completion
 
 .PHONY: clean
 clean:
-	rm -f *.xml.tmp *.1 *.5 *.8 *.adoc docinfo.xml *.bash-completion *.zsh-completion
+	$(MAKE) cleanup-docgen
+	rm -f *.bash-completion *.zsh-completion

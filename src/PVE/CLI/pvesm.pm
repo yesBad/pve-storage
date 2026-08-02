@@ -3,30 +3,34 @@ package PVE::CLI::pvesm;
 use strict;
 use warnings;
 
-use POSIX qw(O_RDONLY O_WRONLY O_CREAT O_TRUNC);
 use Fcntl ':flock';
 use File::Path;
-use MIME::Base64 qw(encode_base64);
-
 use IO::Socket::IP;
 use IO::Socket::UNIX;
+use MIME::Base64 qw(encode_base64);
+use POSIX qw(O_RDONLY O_WRONLY O_CREAT O_TRUNC);
 use Socket qw(SOCK_STREAM);
 
-use PVE::SafeSyslog;
+use PVE::CLIFormatter;
+use PVE::CLIHandler;
 use PVE::Cluster;
 use PVE::INotify;
+use PVE::JSONSchema qw(get_standard_option);
+use PVE::Network;
+use PVE::PTY;
+use PVE::RESTHandler;
 use PVE::RPCEnvironment;
-use PVE::Storage;
+use PVE::SafeSyslog;
 use PVE::Tools qw(extract_param);
+
+use PVE::Storage;
+use PVE::Storage::Plugin;
+
 use PVE::API2::Storage::Config;
 use PVE::API2::Storage::Content;
 use PVE::API2::Storage::PruneBackups;
 use PVE::API2::Storage::Scan;
 use PVE::API2::Storage::Status;
-use PVE::JSONSchema qw(get_standard_option);
-use PVE::PTY;
-
-use PVE::CLIHandler;
 
 use base qw(PVE::CLIHandler);
 
@@ -193,31 +197,44 @@ __PACKAGE__->register_method({
 my $print_content = sub {
     my ($list) = @_;
 
-    my ($maxlenname, $maxsize) = (0, 0);
+    # Fold approximate-size into size with a marker, so the rest only deals with one field.
+    for my $info (@$list) {
+        if (!defined($info->{size}) && defined($info->{'approximate-size'})) {
+            $info->{size} = delete $info->{'approximate-size'};
+            $info->{is_approximate} = 1;
+        }
+    }
+
+    my ($maxlenname, $maxsize, $has_approximate_size) = (0, 0, 0);
     foreach my $info (@$list) {
-        my $volid = $info->{volid};
-        my $sidlen = length($volid);
+        my $sidlen = length($info->{volid});
         $maxlenname = $sidlen if $sidlen > $maxlenname;
-        $maxsize = $info->{size} if ($info->{size} // 0) > $maxsize;
+        $maxsize = $info->{size} if defined($info->{size}) && $info->{size} > $maxsize;
+        $has_approximate_size ||= $info->{is_approximate};
     }
     my $sizemaxdigits = length($maxsize);
+    $sizemaxdigits += 1 if $has_approximate_size;
 
     my $basefmt = "%-${maxlenname}s %-7s %-9s %${sizemaxdigits}s";
     printf "$basefmt %s\n", "Volid", "Format", "Type", "Size", "VMID";
 
+    my $get_size_str = sub {
+        my ($info) = @_;
+        return "-" if !defined($info->{size});
+        return $info->{is_approximate} ? "~$info->{size}" : "$info->{size}";
+    };
+
     foreach my $info (@$list) {
         next if !$info->{vmid};
-        my $volid = $info->{volid};
-
-        printf "$basefmt %d\n", $volid, $info->{format}, $info->{content}, $info->{size},
+        printf "$basefmt %d\n",
+            $info->{volid}, $info->{format}, $info->{content}, $get_size_str->($info),
             $info->{vmid};
     }
 
     foreach my $info (sort { $a->{format} cmp $b->{format} } @$list) {
         next if $info->{vmid};
-        my $volid = $info->{volid};
-
-        printf "$basefmt\n", $volid, $info->{format}, $info->{content}, $info->{size};
+        printf "$basefmt\n",
+            $info->{volid}, $info->{format}, $info->{content}, $get_size_str->($info);
     }
 };
 

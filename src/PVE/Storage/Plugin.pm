@@ -1154,7 +1154,6 @@ sub free_image {
             ) {
                 my $snap = $snapshots->{$snapid};
                 next if $snapid eq 'current';
-                next if !$snap->{ext};
                 eval { free_snap_image($class, $storeid, $scfg, $volname, $snapid); };
                 warn $@ if $@;
             }
@@ -1340,14 +1339,36 @@ sub volume_size_info {
 
 }
 
+=head3 volume_resize
+
+    $plugin->volume_resize(\%scfg, $storeid, $volname, $size, $running, $snapname);
+
+Resize a volume to the new C<$size> in bytes. The size is guaranteed to be a multiple of C<1024>.
+The implementation may pad to a larger size if required. In case of virtual machines, C<$running>
+indicates that the VM is currently running and the call will be followed by a C<block_resize> QMP
+command in QEMU. If resizing is supported natively via QEMU (for example, when using librbd), then
+the plugin should simply return if the VM is running. For containers, C<$running> will always be
+C<0>. If a snapshot name is specified via C<$snapname>, then the snapshot is the target of the
+resize operation.
+
+C<die>s in case of errors, or if the underlying storage implementation or the volume's format
+doesn't support resizing.
+
+This function should not return any value.
+
+=cut
+
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running, $snapname) = @_;
 
     die "can't resize this image format\n" if $volname !~ m/\.(raw|qcow2)$/;
 
     return 1 if $running;
 
-    my $path = $class->filesystem_path($scfg, $volname);
+    die "resizing a snapshot is not supported for $class without 'snapshot-as-volume-chain'\n"
+        if !$scfg->{'snapshot-as-volume-chain'} && $snapname;
+
+    my $path = $class->filesystem_path($scfg, $volname, $snapname);
 
     my $format = ($class->parse_volname($volname))[6];
 
@@ -1812,10 +1833,52 @@ sub status {
     return ($res->{total}, $res->{avail}, $res->{used}, 1);
 }
 
-# Returns a hash with the snapshot names as keys and the following data:
-# id        - Unique id to distinguish different snapshots even if the have the same name.
-# timestamp - Creation time of the snapshot (seconds since epoch).
-# Returns an empty hash if the volume does not exist.
+=head3 volume_snapshot_info
+
+    my $snapshots = $plugin->volume_snapshot_info($scfg, $storeid, $volname);
+    my $childsnap = $snapshots->{$snap}->{child};
+    my $childpath = $snapshots->{$childsnap}->{file};
+
+Query information about snapshots for C<$volname>. The result is a hash reference with snapshot
+names as keys and additional information as values. Different information is required for supporting
+the C<snapshot-as-volume-chain> storage configuration option and for supporting replication (note
+that replication is currently limited to native ZFS plugins).
+
+For C<snapshot-as-volume-chain> support, an entry with key C<current> exists for the current state.
+Required values are:
+
+=over
+
+=item C<file>: The image filename of the external snapshot volume.
+
+=item C<volname>: The volume name of the external snapshot volume.
+
+=item C<volid>: The volume ID of the external snapshot volume.
+
+=item C<virtual-size>: The virtual size of the volume recorded by the snapshot.
+
+=item C<child>: The name of the child snapshot in the volume chain. Not set if there is no child.
+
+=item C<parent>: The name of the parent snapshot in the volume chain. Not set if there is no parent.
+
+=item C<order>: Number that determines the position in the backing chain. C<0> for the current
+image, one more for each step further back in the volume chain.
+
+=back
+
+For replication support, returns an empty hash if the volume does not exist. Required values are:
+
+=over
+
+=item C<id>: Unique identifier of the snapshot. Must be the same for the replicated instance. Must
+be different for different snapshots even if they share the same name.
+
+=item C<timestamp>: Creation time of the snapshot (seconds since epoch).
+
+=back
+
+=cut
+
 sub volume_snapshot_info {
     my ($class, $scfg, $storeid, $volname) = @_;
 
@@ -1836,7 +1899,8 @@ sub volume_snapshot_info {
     my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
         $class->parse_volname($volname);
 
-    my $json = PVE::Storage::Common::qemu_img_info($path, undef, 10, 1);
+    my $json =
+        PVE::Storage::Common::qemu_img_info($path, undef, 10, $scfg->{'snapshot-as-volume-chain'});
     die "failed to query file information with qemu-img\n" if !$json;
     my $json_decode = eval { decode_json($json) };
     if ($@) {
@@ -1844,17 +1908,8 @@ sub volume_snapshot_info {
     }
     my $info = {};
     my $order = 0;
-    if (ref($json_decode) eq 'HASH') {
-        #internal snapshots is a hashref
-        my $snapshots = $json_decode->{snapshots};
-        for my $snap (@$snapshots) {
-            my $snapname = $snap->{name};
-            $info->{$snapname}->{order} = $snap->{id};
-            $info->{$snapname}->{timestamp} = $snap->{'date-sec'};
-
-        }
-    } elsif (ref($json_decode) eq 'ARRAY') {
-        #no snapshot or external  snapshots is an arrayref
+    if ($scfg->{'snapshot-as-volume-chain'}) {
+        # calling qemu_img_info() with $follow_backing_files gives an array reference
         my $snapshots = $json_decode;
         for my $snap (@$snapshots) {
             my $snapfile = $snap->{filename};
@@ -1870,7 +1925,7 @@ sub volume_snapshot_info {
             $info->{$snapname}->{file} = $snapfile;
             $info->{$snapname}->{volname} = "$snapvolname";
             $info->{$snapname}->{volid} = "$storeid:$snapvolname";
-            $info->{$snapname}->{ext} = 1;
+            $info->{$snapname}->{'virtual-size'} = $snap->{'virtual-size'};
 
             my $parentfile = $snap->{'backing-filename'};
             if ($parentfile) {
@@ -1879,6 +1934,14 @@ sub volume_snapshot_info {
                 $info->{$parentname}->{child} = $snapname;
             }
             $order++;
+        }
+    } else {
+        # calling qemu_img_info() without $follow_backing_files gives a single hash reference
+        my $snapshots = $json_decode->{snapshots};
+        for my $snap (@$snapshots) {
+            my $snapname = $snap->{name};
+            $info->{$snapname}->{timestamp} = $snap->{'date-sec'};
+
         }
     }
 
@@ -1899,40 +1962,68 @@ sub activate_storage {
             . "directory '$path' does not exist or is unreachable\n";
     }
 
+    if (!defined($scfg->{content})) {
+        return;
+    }
+
+    my $try_create_subdir = sub {
+        my ($vtype) = @_;
+
+        my $subdir = $class->get_subdir($scfg, $vtype);
+
+        File::Path::make_path($subdir, { error => \my $errors });
+        if (defined($errors) && scalar($errors->@*)) {
+            my $msg = "failed to create content directory '$subdir' for content '$vtype'";
+
+            for my $err_hash ($errors->@*) {
+                my ($file, $err_msg) = $err_hash->%*;
+
+                if (
+                    $err_msg =~ m/permission \s denied/ix
+                    || $err_msg =~ m/read -? only \s file \s? system/ix
+                ) {
+                    my $msg_prompt =
+                        "ensure that you have read and write access to your storage!";
+
+                    die "$msg - $err_msg - $msg_prompt\n";
+                }
+
+                die "$msg - $err_msg\n";
+            }
+        }
+    };
+
     # TODO: mkdir is basically deprecated since 8.0, but we don't warn here until 8.4 or 9.0, as we
     # only got the replacement in 8.0, so no real replacement window, and its really noisy.
 
-    if (defined($scfg->{content})) {
-        # (opt-out) create content dirs and check validity
-        if (
-            (!defined($scfg->{'create-subdirs'}) || $scfg->{'create-subdirs'})
-            # FIXME The mkdir option is deprecated. Remove with PVE 9?
-            && (!defined($scfg->{mkdir}) || $scfg->{mkdir})
-        ) {
-            for my $vtype (sort keys %$vtype_subdirs) {
-                # OpenVZMigrate uses backup (dump) dir
-                if (
-                    defined($scfg->{content}->{$vtype})
-                    || ($vtype eq 'backup' && defined($scfg->{content}->{'rootdir'}))
-                ) {
-                    my $subdir = $class->get_subdir($scfg, $vtype);
-                    mkpath $subdir if $subdir ne $path;
-                }
+    # (opt-out) create content dirs and check validity
+    if (
+        (!defined($scfg->{'create-subdirs'}) || $scfg->{'create-subdirs'})
+        # FIXME The mkdir option is deprecated. Remove with PVE 9?
+        && (!defined($scfg->{mkdir}) || $scfg->{mkdir})
+    ) {
+        for my $vtype (sort keys %$vtype_subdirs) {
+            # OpenVZMigrate uses backup (dump) dir
+            if (
+                defined($scfg->{content}->{$vtype})
+                || ($vtype eq 'backup' && defined($scfg->{content}->{'rootdir'}))
+            ) {
+                $try_create_subdir->($vtype);
             }
         }
+    }
 
-        # check that content dirs are pairwise inequal
-        my $resolved_subdirs = {};
-        for my $vtype (sort keys $scfg->{content}->%*) {
-            my $subdir = $class->get_subdir($scfg, $vtype);
-            my $abs_subdir = abs_path($subdir);
-            next if !defined($abs_subdir);
+    # check that content dirs are pairwise inequal
+    my $resolved_subdirs = {};
+    for my $vtype (sort keys $scfg->{content}->%*) {
+        my $subdir = $class->get_subdir($scfg, $vtype);
+        my $abs_subdir = abs_path($subdir);
+        next if !defined($abs_subdir);
 
-            die "storage '$storeid' uses directory $abs_subdir for multiple content types\n"
-                if defined($abs_subdir) && defined($resolved_subdirs->{$abs_subdir});
+        die "storage '$storeid' uses directory $abs_subdir for multiple content types\n"
+            if defined($abs_subdir) && defined($resolved_subdirs->{$abs_subdir});
 
-            $resolved_subdirs->{$abs_subdir} = 1;
-        }
+        $resolved_subdirs->{$abs_subdir} = 1;
     }
 }
 
@@ -2115,17 +2206,13 @@ sub volume_export {
                 run_command(
                     ['dd', "if=$file", "bs=4k", "status=progress"],
                     output => '>&' . fileno($fh),
+                    # split dd's carriage-return driven progress output into individual log lines
+                    errfunc => sub { print STDERR "$_[0]\n" },
                 );
             } else {
                 run_command(
                     [
-                        'qemu-img',
-                        'convert',
-                        '-f',
-                        $file_format,
-                        '-O',
-                        'raw',
-                        $file,
+                        'qemu-img', 'convert', '-f', $file_format, '-O', 'raw', $file,
                         '/dev/stdout',
                     ],
                     output => '>&' . fileno($fh),
@@ -2139,6 +2226,8 @@ sub volume_export {
             run_command(
                 ['dd', "if=$file", "bs=4k", "status=progress"],
                 output => '>&' . fileno($fh),
+                # split dd's carriage-return driven progress output into individual log lines
+                errfunc => sub { print STDERR "$_[0]\n" },
             );
             return;
         } elsif ($format eq 'tar+size') {
@@ -2573,6 +2662,23 @@ sub config_aware_base_mkdir {
     if ($scfg->{'create-base-path'} // $scfg->{mkdir} // 1) {
         mkpath($path);
     }
+}
+
+=pod
+
+=head3 get_identity
+
+    $plugin->get_identity($scfg, $storeid)
+
+Return a unique identifier for this storage instance. The exact format and semantics
+may vary based on the concrete plugin implementation.
+
+=cut
+
+sub get_identity {
+    my ($class, $scfg, $storeid) = @_;
+
+    die("get_identity not implemented for this plugin");
 }
 
 1;

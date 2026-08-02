@@ -7,12 +7,46 @@ use IO::File;
 use Net::IP;
 use POSIX;
 
+use PVE::JSONSchema;
 use PVE::ProcFSTools;
 use PVE::RPCEnvironment;
 use PVE::Storage::Plugin;
 use PVE::Tools qw(run_command);
 
 use base qw(PVE::Storage::Plugin);
+
+sub verify_zfs_blocksize {
+    my ($value, $noerr) = @_;
+
+    return $value if !defined($value) || $value eq '';
+
+    if ($value =~ m/^([1-9][0-9]*)([km])?$/i) {
+        my ($num, $unit) = ($1, lc($2 // ''));
+
+        if ($unit eq 'k') {
+            $num *= 1024;
+        } elsif ($unit eq 'm') {
+            $num *= 1024 * 1024;
+        }
+
+        if (
+            $num >= 512
+            && $num <= 16 * 1024 * 1024
+            && ($num & ($num - 1)) == 0 # check if it's a power of 2
+        ) {
+            return $value;
+        }
+
+        return undef if $noerr;
+        die "value '$value' is not a valid ZFS blocksize. Must be a power of 2 "
+            . "between 512B and 16MiB (e.g., 4k, 8k, 16k, 64k, 1m).\n";
+    }
+
+    return undef if $noerr;
+    die "invalid ZFS blocksize format '$value'. Use a positive number "
+        . "(no leading zeros) with an optional 'k' or 'm' suffix.\n";
+}
+PVE::JSONSchema::register_format('pve-storage-zfs-blocksize', \&verify_zfs_blocksize);
 
 sub type {
     return 'zfspool';
@@ -29,8 +63,10 @@ sub plugindata {
 sub properties {
     return {
         blocksize => {
-            description => "block size",
+            description => "ZFS block size",
             type => 'string',
+            format => 'pve-storage-zfs-blocksize',
+            format_description => 'a power of 2 with optional k or m suffix',
         },
         sparse => {
             description => "use sparse volumes",
@@ -526,6 +562,7 @@ sub volume_snapshot_rollback {
         my $refquota = $class->zfs_get_properties($scfg, 'pve-storage:refquota', $snapshot_name);
 
         if ($refquota =~ m/^\d+$/) {
+            $refquota = 'none' if $refquota == 0; # zfs does not accept 0 for refquota property
             $class->zfs_request(
                 $scfg, undef, 'set', "refquota=${refquota}", "$scfg->{pool}/$vname",
             );
@@ -688,10 +725,8 @@ sub clone_image {
     my $name = $class->find_free_diskname($storeid, $scfg, $vmid, $format);
 
     if ($format eq 'subvol') {
-        my $size = $class->zfs_request(
-            $scfg, undef, 'list', '-Hp', '-o', 'refquota', "$scfg->{pool}/$basename",
-        );
-        chomp($size);
+        my $refquota = $class->zfs_get_properties($scfg, 'refquota', "$scfg->{pool}/$basename");
+        $refquota = 'none' if $refquota == 0; # zfs does not accept 0 for refquota property
         $class->zfs_request(
             $scfg,
             undef,
@@ -699,7 +734,7 @@ sub clone_image {
             "$scfg->{pool}/$basename\@$snap",
             "$scfg->{pool}/$name",
             '-o',
-            "refquota=$size",
+            "refquota=$refquota",
         );
     } else {
         $class->zfs_request(
@@ -742,7 +777,9 @@ sub create_base {
 }
 
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running, $snapname) = @_;
+
+    die "resizing a snapshot is not supported for $class\n" if $snapname;
 
     my $new_size = int($size / 1024);
 
@@ -817,14 +854,25 @@ sub volume_export {
     # For zfs we always create a replication stream (-R) which means the remote
     # side will always delete non-existing source snapshots. This should work
     # for all our use cases.
-    my $cmd = ['zfs', 'send', '-Rpv'];
+    my $cmd = ['zfs', 'send', '-RpvU'];
     if (defined($base_snapshot)) {
         my $arg = $with_snapshots ? '-I' : '-i';
         push @$cmd, $arg, $base_snapshot;
     }
     push @$cmd, '--', "$scfg->{pool}/$dataset\@$snapshot";
 
-    run_command($cmd, output => $fd);
+    run_command(
+        $cmd,
+        output => $fd,
+        errfunc => sub {
+            my $line = shift;
+            if ($line !~ /^WARNING: no-preserve-encryption flag set, sending dataset/) {
+                chomp($line);
+                print STDERR "$line\n";
+                *STDERR->flush();
+            }
+        },
+    );
 
     return;
 }
@@ -879,7 +927,10 @@ sub volume_import {
         $zfspath = "$scfg->{pool}/$dataset";
     }
 
-    eval { run_command(['zfs', 'recv', '-F', '--', $zfspath], input => "<&$fd") };
+    eval {
+        run_command(['zfs', 'recv', '-F', '-x', 'encryption', '--', $zfspath],
+            input => "<&$fd");
+    };
     if (my $err = $@) {
         if (defined($base_snapshot)) {
             eval { run_command(['zfs', 'rollback', '-r', '--', "$zfspath\@$base_snapshot"]) };

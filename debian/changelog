@@ -1,3 +1,125 @@
+libpve-storage-perl (9.1.7) trixie; urgency=medium
+
+  * plugins: volume export: capture dd progress output line by line, instead of
+    as a single long line requiring horizontal scrolling
+
+  * zfspool: export: fix regression with printing progress output caused by
+    missing newline characters.
+
+  * fix #7811: storage: lvm: reject allocation on format and volume name
+    mismatch. LVM historically only supported the raw format, and has no
+    extension in the volume name for such volumes, which made them fall through
+    the existing checks.
+
+  * zfspool plugin: fix regression for rollback with refquota=none and a
+    similar issue when creating linked clones of containers, both caused by ZFS
+    not treating `0` as `none`.
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 24 Jul 2026 11:57:30 +0200
+
+libpve-storage-perl (9.1.6) trixie; urgency=medium
+
+  * fix #7094: lvm: snapshot delete: when using 'snapshot-as-volume-chain',
+    grow the target snapshot volume to fit its child before committing.
+    Deleting the first snapshot of a volume that was resized after the
+    snapshot was taken could otherwise fail, as the target LV was too small to
+    hold the merged data. Handles the offline case; the online (running VM)
+    case is fixed in qemu-server.
+
+  * plugin api: backward compatible plugin api version bump for the new
+    optional 'snapname' parameter of volume_resize() and the new
+    'virtual-size' field returned by volume_snapshot_info(), both needed for
+    snapshot removal with resized images on 'snapshot-as-volume-chain'
+    storages.
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 29 May 2026 21:45:40 +0200
+
+libpve-storage-perl (9.1.5) trixie; urgency=medium
+
+  * fix #7143: lvm plugin: scope qcow2 volume (de)activation to the actual
+    target volume group via lvchange '--select' instead of the per-name tag.
+    The tag-based selection previously pulled in volumes with the same name
+    (and their snapshots) on other LVM storages.
+
+  * fix #7280: lvm plugin: rename: activate the source qcow2 volume before
+    reading its snapshot info, otherwise the rename failed for inactive qcow2
+    LVs since qemu-img cannot read the header without a /dev node.
+
+  * lvm plugin: rename: keep the per-VM tag (and, for qcow2, the per-volname
+    tag) in sync when reassigning a volume to a different VM. Skip the
+    lvchange invocation entirely when source and target VMID match (e.g.
+    same-CT mountpoint reassign on raw LVs), since the equivalent '--addtag X
+    --deltag X' could otherwise leave the volume untagged.
+
+  * fix #6819: lvm plugin: list_images: for inactive qcow2 LVs, report the LV
+    allocation size as the new 'approximate-size' field instead of activating
+    each LV per listing call. Activating is costly and, on shared LVM, often
+    impossible because the LV may already be active on another node.
+
+  * api/cli: list content: declare 'size' as optional and add a new
+    'approximate-size' field for storages where determining the exact size has
+    technical limitations. The 'pvesm list' CLI prefixes such values with '~'.
+    External API consumers should treat 'size' as potentially absent and fall
+    back to 'approximate-size'.
+
+  * plugin: activate_storage: improve error reporting when creating the
+    per-content-type subdirectories fails, including an explicit hint about
+    read-write access to the storage on EACCES/EROFS errors.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 18 May 2026 21:12:27 +0200
+
+libpve-storage-perl (9.1.4) trixie; urgency=medium
+
+  * fix #3936: zfspool: validate the 'blocksize' property via a new dedicated
+    JSON schema format, requiring a power of two between 512 bytes and 16 MiB
+    with optional 'k' or 'm' suffix. Previously invalid values were silently
+    accepted at the storage configuration level and only surfaced as errors on
+    first volume allocation.
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 15 May 2026 10:13:05 +0200
+
+libpve-storage-perl (9.1.3) trixie; urgency=medium
+
+  * fix #2350: zfspool: support `zfs send` without preserving encryption, to
+    allow storage migration and replication of ZFS-native-encrypted guest
+    disks while inheriting encryption settings from the target dataset, rather
+    than requiring raw sends that bind keys per volume. Receiving nodes need
+    this fix applied before the first such send to avoid creating the
+    destination dataset unencrypted under an encrypted parent.
+
+  * api: add new `GET /nodes/{node}/storage/{storage}/identity` endpoint that
+    returns a stable identifier for the underlying storage backend. Initially
+    supported for PBS storages, where it returns the recently added PBS
+    instance ID, This is intended to be consumed by PDM to map PBS storages to
+    configured PBS remotes. Other storage types may add support over time via
+    the new `get_identity()` plugin method.
+
+  * plugin api: backward compatible plugin api version bump for the new
+    `get_identity()` method, justified by the new API and plugin method being
+    completely optional.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 13 May 2026 03:56:16 +0200
+
+libpve-storage-perl (9.1.2) trixie; urgency=medium
+
+  * import: contain XML parser with simple seccomp filter that disallows all
+    but the absolutely required syscalls as defense-in-depth sandbox.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 21 Apr 2026 17:55:57 +0200
+
+libpve-storage-perl (9.1.1) trixie; urgency=medium
+
+  * cifs: fix connection check for Kerberos-authenticated shares. With
+    smbclient 4.22 (shipped in Debian trixie), the previous guest-user
+    fallback no longer works, causing the check to fail. Properly detect
+    Kerberos from the mount options and use native Kerberos authentication for
+    the connection check instead.
+
+  * api: status: fix storage size values being returned in scientific notation
+    for large storages, which broke deserialization in PDM.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 17 Mar 2026 21:54:31 +0100
+
 libpve-storage-perl (9.1.0) trixie; urgency=medium
 
   * import/export formats: fix regression for import/export of 'images'

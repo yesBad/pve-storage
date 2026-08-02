@@ -23,6 +23,8 @@ use PVE::Storage;
 
 use base qw(PVE::RESTHandler);
 
+my $storage_type_enum = PVE::Storage::Plugin->lookup_types();
+
 __PACKAGE__->register_method({
     subclass => "PVE::API2::Storage::PruneBackups",
     path => '{storage}/prunebackups',
@@ -308,6 +310,7 @@ __PACKAGE__->register_method({
             { subdir => 'download-url' },
             { subdir => 'file-restore' },
             { subdir => 'import-metadata' },
+            { subdir => 'identity' },
             { subdir => 'oci-registry-pull' },
             { subdir => 'prunebackups' },
             { subdir => 'rrd' },
@@ -1115,6 +1118,63 @@ __PACKAGE__->register_method({
                 return PVE::Storage::get_import_metadata($cfg, $volid);
             },
         );
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'identity',
+    path => '{storage}/identity',
+    method => 'GET',
+    description => "Return identity information for this storage instance.",
+    permissions => {
+        check => [
+            'perm',
+            '/storage/{storage}',
+            ['Datastore.Audit', 'Datastore.AllocateSpace'],
+            any => 1,
+        ],
+    },
+    protected => 1,
+    proxyto => 'node',
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            storage => get_standard_option('pve-storage-id'),
+        },
+    },
+    returns => {
+        type => "object",
+        properties => {
+            'type' => {
+                type => 'string',
+                description => 'The type of the storage.',
+                enum => $storage_type_enum,
+            },
+            'id' => {
+                type => 'string',
+                description => 'Unique identifier for this storage instance.'
+                    . ' The exact format and semantics depend on the storage plugin type.',
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $cfg = PVE::Storage::config();
+
+        my ($node, $storeid) = $param->@{qw(node storage)};
+        my $scfg = PVE::Storage::storage_check_enabled($cfg, $storeid, $node);
+
+        my $type = $scfg->{type};
+        my $plugin = PVE::Storage::Plugin->lookup($type);
+
+        my $id = $plugin->get_identity($scfg, $storeid);
+
+        return {
+            type => $type,
+            id => $id,
+        };
     },
 });
 

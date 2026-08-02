@@ -41,11 +41,11 @@ use PVE::Storage::BTRFSPlugin;
 use PVE::Storage::ESXiPlugin;
 
 # Storage API version. Increment it on changes in storage API interface.
-use constant APIVER => 13;
+use constant APIVER => 15;
 # Age is the number of versions we're backward compatible with.
 # This is like having 'current=APIVER' and age='APIAGE' in libtool,
 # see https://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
-use constant APIAGE => 4;
+use constant APIAGE => 6;
 
 our $KNOWN_EXPORT_FORMATS = ['raw+size', 'tar+size', 'qcow2+size', 'vmdk+size', 'zfs', 'btrfs'];
 
@@ -393,7 +393,7 @@ sub volume_size_info {
 }
 
 sub volume_resize {
-    my ($cfg, $volid, $size, $running) = @_;
+    my ($cfg, $volid, $size, $running, $snapname) = @_;
 
     my $padding = (1024 - $size % 1024) % 1024;
     $size = $size + $padding;
@@ -402,7 +402,7 @@ sub volume_resize {
     if ($storeid) {
         my $scfg = storage_config($cfg, $storeid);
         my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
-        return $plugin->volume_resize($scfg, $storeid, $volname, $size, $running);
+        return $plugin->volume_resize($scfg, $storeid, $volname, $size, $running, $snapname);
     } elsif ($volid =~ m|^(/.+)$| && -e $volid) {
         die "resize file/device '$volid' is not possible\n";
     } else {

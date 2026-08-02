@@ -3,16 +3,19 @@ package PVE::API2::Storage::Content;
 use strict;
 use warnings;
 
-use PVE::SafeSyslog;
 use PVE::Cluster;
+use PVE::Exception qw(raise_param_exc);
+use PVE::INotify;
+use PVE::JSONSchema qw(get_standard_option);
+use PVE::ProcFSTools;
+use PVE::RESTHandler;
+use PVE::RPCEnvironment;
+use PVE::SafeSyslog;
+use PVE::SSHInfo;
+use PVE::Tools;
+
 use PVE::Storage;
 use PVE::Storage::Common; # for 'pve-storage-image-format' standard option
-use PVE::INotify;
-use PVE::Exception qw(raise_param_exc);
-use PVE::RPCEnvironment;
-use PVE::RESTHandler;
-use PVE::JSONSchema qw(get_standard_option);
-use PVE::SSHInfo;
 
 use base qw(PVE::RESTHandler);
 
@@ -86,6 +89,17 @@ __PACKAGE__->register_method({
                     description => "Volume size in bytes.",
                     type => 'integer',
                     renderer => 'bytes',
+                    optional => 1,
+                },
+                'approximate-size' => {
+                    description =>
+                        "Approximate volume size in bytes. Present instead of 'size' for storages"
+                        . " where determining the exact size has technical limitations. Will"
+                        . " typically be an upper bound on the actual size, but the exact"
+                        . " semantics depend on the storage plugin.",
+                    type => 'integer',
+                    renderer => 'bytes',
+                    optional => 1,
                 },
                 used => {
                     description => "Used space. Please note that most storage plugins "
@@ -160,9 +174,9 @@ __PACKAGE__->register_method({
                 );
             };
             next if $@;
-            $item->{vmid} = int($item->{vmid}) if defined($item->{vmid});
-            $item->{size} = int($item->{size}) if defined($item->{size});
-            $item->{used} = int($item->{used}) if defined($item->{used});
+            for my $prop (qw(approximate-size size used vmid)) {
+                $item->{$prop} = int($item->{$prop}) if defined($item->{$prop});
+            }
             push @$res, $item;
         }
 

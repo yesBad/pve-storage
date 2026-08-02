@@ -977,7 +977,7 @@ sub volume_size_info {
 }
 
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running, $snapname) = @_;
     die "volume resize is not possible on pbs device";
 }
 
@@ -1000,6 +1000,15 @@ sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
     return undef;
+}
+
+sub get_identity {
+    my ($class, $scfg, $storeid) = @_;
+
+    my $client = PVE::PBSClient->new($scfg, $storeid);
+    my $ret = $client->get_server_identity();
+
+    return $ret->{'pbs-instance-id'};
 }
 
 1;

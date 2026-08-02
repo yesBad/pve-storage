@@ -6,6 +6,39 @@ without breaking anything unaware of it.)
 
 Future changes should be documented in here.
 
+## Version 15:
+
+* Add new `$snapname` parameter to the `volume_resize()` plugin method
+
+  If specified, the snapshot is the target of the resize operation. This is currently only used in
+  combination with the `snapshot-as-volume-chain` configuration option before a commit operation.
+  Plugins that do not support the `snapshot-as-volume-chain` configuration option may either die
+  when `$snapname` is set or must implement resizing snapshots.
+
+* Add `virtual-size` to the information returned by the `volume_snapshot_info()` plugin method
+
+  This is the virtual size of the volume at the time the snapshot was taken. This information is
+  required for storages with the `snapshot-as-volume-chain` configuration option, to make snapshot
+  removal work correctly in combination with resizing images.
+
+* Properly document `volume_snapshot_info()` plugin method
+
+  If you already implement this method, check that the returned information is in line with the
+  documentation.
+
+## Version 14:
+
+* Introduce `get_identity()` plugin method
+
+  Plugins can implement this method to return a unique identifier for the underlying storage
+  instance. The format and semantics of the returned identifier are up to the concrete plugin,
+  for example a UUID or a server-provided instance ID that identifies the backend independently
+  of how the storage is configured in `/etc/pve/storage.cfg`.
+
+  The base implementation dies, so plugins for which the concept of a stable backend identity
+  does not apply may leave the method unimplemented. Implement this method when the storage
+  backend exposes an identity that consumers may want to correlate across storage definitions.
+
 ## Version 13:
 
 * Add new parameter $hints to the `activate_volume()` and `map_volume()` plugin methods
