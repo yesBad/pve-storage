@@ -22,6 +22,10 @@ use PVE::Storage::Common;
 
 use base qw(PVE::Storage::Plugin);
 
+use constant FORMAT_EXTENSION => {
+    raw => '',
+};
+
 my $get_parent_image_name = sub {
     my ($parent) = @_;
     return undef if !$parent;
@@ -125,8 +129,8 @@ my $rbd_cmd = sub {
     }
     push @$cmd, '-c', $cmd_option->{ceph_conf} if ($cmd_option->{ceph_conf});
     push @$cmd, '-m', $cmd_option->{mon_host} if ($cmd_option->{mon_host});
-    push @$cmd, '--auth_supported', $cmd_option->{auth_supported}
-        if ($cmd_option->{auth_supported});
+    push @$cmd, '--auth_client_required', $cmd_option->{auth_client_required}
+        if ($cmd_option->{auth_client_required});
     push @$cmd, '-n', "client.$cmd_option->{userid}" if ($cmd_option->{userid});
     push @$cmd, '--keyring', $cmd_option->{keyring} if ($cmd_option->{keyring});
 
@@ -516,6 +520,14 @@ sub parse_volname {
     die "unable to parse rbd volume name '$volname'\n";
 }
 
+sub get_parsed_format {
+    my ($class, $name) = @_;
+
+    $class->parse_volname($name); # dies for names that are not valid volume names
+
+    return $name =~ m/\.(raw|qcow2|vmdk|subvol)$/ ? $1 : 'raw';
+}
+
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
@@ -536,7 +548,7 @@ sub path {
         my $monhost = PVE::CephConfig::hostlist($scfg->{monhost}, ';');
         $monhost =~ s/:/\\:/g;
         $path .= ":mon_host=$monhost";
-        $path .= ":auth_supported=$cmd_option->{auth_supported}";
+        $path .= ":auth_client_required=$cmd_option->{auth_client_required}";
     }
 
     $path .= ":id=$cmd_option->{userid}:keyring=$cmd_option->{keyring}" if ($cmd_option->{keyring});
@@ -575,7 +587,7 @@ sub qemu_blockdev_options {
             push @$server, { host => $host, port => $port };
         }
         $blockdev->{server} = $server;
-        $blockdev->{'auth-client-required'} = ["$cmd_option->{auth_supported}"];
+        $blockdev->{'auth-client-required'} = ["$cmd_option->{auth_client_required}"];
     }
 
     $blockdev->{user} = "$cmd_option->{userid}" if $cmd_option->{keyring};
@@ -708,6 +720,8 @@ sub alloc_image {
         if $name && $name !~ m/^vm-$vmid-/;
 
     $name = $class->find_free_diskname($storeid, $scfg, $vmid) if !$name;
+
+    $name = $class->volname_for_format($name, $fmt, 0);
 
     my @options = (
         '--image-format', 2, '--size', int(($size + 1023) / 1024),
@@ -1080,6 +1094,8 @@ sub rename_volume {
     ) = $class->parse_volname($source_volname);
     $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format)
         if !$target_volname;
+
+    $target_volname = $class->volname_for_format($target_volname, $format, 0);
 
     die "target volume '${target_volname}' already exists\n"
         if rbd_volume_exists($scfg, $storeid, $target_volname);

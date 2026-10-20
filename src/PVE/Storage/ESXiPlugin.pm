@@ -3,12 +3,13 @@ package PVE::Storage::ESXiPlugin;
 use strict;
 use warnings;
 
-use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
+use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC O_RDONLY);
 use File::Path qw(mkpath remove_tree);
 use JSON qw(from_json);
 use Net::IP;
 use POSIX ();
 
+use PVE::File;
 use PVE::Network;
 use PVE::Systemd;
 use PVE::Tools qw(file_get_contents file_set_contents run_command);
@@ -301,8 +302,10 @@ sub get_import_metadata : prototype($$$$$) {
         die "storage '$storeid' is not activated\n";
     }
 
+    my $vmx_fh = PVE::Tools::open_beneath(mount_dir($storeid), $volname, O_RDONLY);
+
     my $manifest = $class->get_manifest($storeid, $scfg, 0);
-    my $contents = file_get_contents($vmx_path);
+    my $contents = PVE::File::safe_read_from($vmx_fh, undef, 0, $vmx_path);
     my $vmx = PVE::Storage::ESXiPlugin::VMX->parse(
         $storeid, $scfg, $volname, $contents, $manifest,
     );
@@ -316,7 +319,7 @@ sub query_vmdk_size : prototype($;$) {
     my $json = eval {
         my $json = '';
         run_command(
-            ['/usr/bin/qemu-img', 'info', '--output=json', $filename],
+            ['/usr/bin/qemu-img', 'info', '--output=json', '--', $filename],
             timeout => $timeout,
             outfunc => sub { $json .= $_[0]; },
             errfunc => sub { warn "$_[0]\n"; },
@@ -420,14 +423,24 @@ sub status {
     return (0, 0, 0, $active);
 }
 
+my sub esxi_assert_volname_is_valid {
+    my ($volname) = @_;
+
+    die "failed to parse volname '$volname'\n"
+        if $volname !~ m!^([^/]+)/([^/]+)/(.+)$!;
+
+    for my $component (split('/', $volname)) {
+        die "invalid volume name '$volname'\n" if $component eq '..';
+    }
+}
+
 sub parse_volname {
     my ($class, $volname) = @_;
 
     # it doesn't really make sense tbh, we can't return an owner, the format
     # may be a 'vmx' (config), the paths are arbitrary...
 
-    die "failed to parse volname '$volname'\n"
-        if $volname !~ m!^([^/]+)/([^/]+)/(.+)$!;
+    esxi_assert_volname_is_valid($volname);
 
     return ('import', $volname, 0, undef, undef, undef, 'vmx') if $volname =~ /\.vmx$/;
 
@@ -487,6 +500,8 @@ sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
     die "storage '$class' does not support snapshots\n" if defined $snapname;
+
+    esxi_assert_volname_is_valid($volname);
 
     return mount_dir($storeid) . '/' . $volname;
 }
@@ -1010,14 +1025,19 @@ sub smbios1_uuid {
 
     if (
         $uuid =~ /^
-	([0-9a-fA-F]{8})
-	([0-9a-fA-F]{4})
-	([0-9a-fA-F]{4})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
+	([0-9a-fA-F]{2})
 	([0-9a-fA-F]{4})
 	([0-9a-fA-F]{12})
 	$/x
     ) {
-        return "$1-$2-$3-$4-$5";
+        return "$4$3$2$1-$6$5-$8$7-$9-$10";
     }
     return;
 }

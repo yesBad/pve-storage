@@ -391,16 +391,28 @@ my $ceph_check_keyfile = sub {
     eval {
         die if !$content;
 
+        # Do not check the base64 padding, it depends on the key length: a key with the
+        # aes256k cipher is 32 bytes and ends on a single '=', the older aes one is 16 bytes
+        # and ends on two. This only checks the shape of the file, not the key itself.
         if ($type eq 'rbd') {
-            die if $content !~ /\s*\[\S+\]\s*key\s*=\s*\S+==\s*$/m;
+            die if $content !~ /\s*\[\S+\]\s*key\s*=\s*\S+\s*$/m;
         } elsif ($type eq 'cephfs') {
-            die if $content !~ /\S+==\s*$/;
+            die if $content !~ /^\s*\S+\s*$/;
         }
     };
     die "Not a proper $type authentication file: $filename\n" if $@;
 
     return undef;
 };
+
+# whether the configuration sets 'auth_client_required' in a section that applies to the client
+my sub ceph_conf_sets_client_auth {
+    my ($config, $userid) = @_;
+
+    return
+        scalar(grep { length(($config->{$_} // {})->{auth_client_required} // '') }
+            ("client.$userid", 'client', 'global'));
+}
 
 sub ceph_connect_option {
     my ($scfg, $storeid, %options) = @_;
@@ -429,8 +441,22 @@ sub ceph_connect_option {
     }
 
     $cmd_option->{keyring} = $keyfile if (-e $keyfile);
-    $cmd_option->{auth_supported} = (defined $cmd_option->{keyring}) ? 'cephx' : 'none';
     $cmd_option->{userid} = $scfg->{username} ? $scfg->{username} : 'admin';
+    # A key file does not tell whether the cluster requires Cephx, as adding a storage copies the
+    # admin key even while Cephx is off. So a setting in the local cluster's ceph.conf applies, as
+    # it already does for QEMU. Without one, require Cephx with a key file, since Ceph's default
+    # would also accept a peer that offers no authentication.
+    # Ceph 19.2.6 dropped the long-deprecated 'auth_supported', which set the cluster, service
+    # and client side at once. Only the client side applies to the connections made from here.
+    if (
+        !$pveceph_managed
+        || !ceph_conf_sets_client_auth(
+            eval { PVE::Cluster::cfs_read_file('ceph.conf') } // {},
+            $cmd_option->{userid},
+        )
+    ) {
+        $cmd_option->{auth_client_required} = (defined $cmd_option->{keyring}) ? 'cephx' : 'none';
+    }
     $cmd_option->{mon_host} = hostlist($scfg->{monhost}, ',') if (defined($scfg->{monhost}));
 
     if (%options) {

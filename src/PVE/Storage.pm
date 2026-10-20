@@ -41,11 +41,11 @@ use PVE::Storage::BTRFSPlugin;
 use PVE::Storage::ESXiPlugin;
 
 # Storage API version. Increment it on changes in storage API interface.
-use constant APIVER => 15;
+use constant APIVER => 16;
 # Age is the number of versions we're backward compatible with.
 # This is like having 'current=APIVER' and age='APIAGE' in libtool,
 # see https://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
-use constant APIAGE => 6;
+use constant APIAGE => 7;
 
 our $KNOWN_EXPORT_FORMATS = ['raw+size', 'tar+size', 'qcow2+size', 'vmdk+size', 'zfs', 'btrfs'];
 
@@ -644,6 +644,13 @@ sub check_volume_access {
         } elsif (($vtype eq 'images' || $vtype eq 'rootdir') && $ownervm) {
             $rpcenv->check($user, "/storage/$sid", ['Datastore.Audit']);
             $rpcenv->check($user, "/vms/$ownervm", ['VM.Config.Disk']);
+        } elsif ($vtype eq 'snippets') {
+            # This check for the snippets vtype was introduced later, so all relevant callers can be
+            # expected to set the $type as well. The check that the type matches is done above.
+            #
+            # This check also prevents snippets from being listed with just AllocateSpace
+            die "cannot access snippet '$volid' for non-snippet use case\n" if !defined($type);
+            $rpcenv->check($user, "/storage/$sid", ['Datastore.AllocateSpace']);
         } else {
             die "missing privileges to access $volid\n";
         }
@@ -1756,31 +1763,17 @@ sub decompressor_info {
     }
 
     my $decompressor = {
-        tar => {
-            gz => ['tar', '-z'],
-            lzo => ['tar', '--lzop'],
-            zst => ['tar', '--zstd'],
-            bz2 => ['tar', '--bzip2'],
-        },
-        vma => {
-            gz => ['zcat'],
-            lzo => ['lzop', '-d', '-c'],
-            zst => ['zstd', '-q', '-d', '-c'],
-            bz2 => ['bzcat', '-q'],
-        },
-        iso => {
-            gz => ['zcat'],
-            lzo => ['lzop', '-d', '-c'],
-            zst => ['zstd', '-q', '-d', '-c'],
-            bz2 => ['bzcat', '-q'],
-        },
+        gz => ['zcat', '--'],
+        lzo => ['lzop', '-d', '-c', '--'],
+        zst => ['zstd', '-q', '-d', '-c', '--'],
+        bz2 => ['bzcat', '-q', '--'],
     };
 
     die "ERROR: archive format not defined\n"
-        if !defined($decompressor->{$format});
+        if !($format eq 'iso' || $format eq 'tar' || $format eq 'vma');
 
     my $decomp;
-    $decomp = $decompressor->{$format}->{$comp} if $comp;
+    $decomp = $decompressor->{$comp} if $comp;
 
     my $info = {
         format => $format,
@@ -1884,7 +1877,7 @@ sub extract_vzdump_config_tar {
         $raw .= "$output\n";
     };
 
-    run_command(['tar', '-xpOf', $archive, $file, '--occurrence'], outfunc => $out);
+    run_command(['tar', '-xpOf', $archive, '--occurrence=1', '--', $file], outfunc => $out);
 
     return wantarray ? ($raw, $file) : $raw;
 }
@@ -1967,11 +1960,8 @@ sub extract_vzdump_config {
     if ($type eq 'lxc' || $type eq 'openvz') {
         return extract_vzdump_config_tar($archive, qr!^(\./etc/vzdump/(pct|vps)\.conf)$!);
     } elsif ($type eq 'qemu') {
-        if ($format eq 'tar') {
-            return extract_vzdump_config_tar($archive, qr!\(\./qemu-server\.conf\)!);
-        } else {
-            return extract_vzdump_config_vma($archive, $comp);
-        }
+        die "backups of format '$format' are not supported for VMs\n" if $format ne 'vma';
+        return extract_vzdump_config_vma($archive, $comp);
     } else {
         die "cannot determine backup guest type for backup archive '$volid'\n";
     }
@@ -2281,7 +2271,7 @@ sub complete_storage_enabled {
 sub complete_content_type {
     my ($cmdname, $pname, $cvalue) = @_;
 
-    return [qw(rootdir images vztmpl iso backup snippets)];
+    return [qw(rootdir images vztmpl iso backup snippets import)];
 }
 
 sub complete_volume {

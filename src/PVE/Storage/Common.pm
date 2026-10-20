@@ -3,6 +3,7 @@ package PVE::Storage::Common;
 use v5.36;
 
 use PVE::JSONSchema;
+use PVE::RPCEnvironment;
 use PVE::Syscall;
 use PVE::Tools qw(run_command);
 
@@ -153,9 +154,10 @@ my sub run_qemu_img_json {
 
     qemu_img_create($fmt, $size, $path, $options)
 
-Create a new qemu image with a specific format C<$format> and size C<$size> for a target C<$path>.
+Create a new qemu image with a specific format C<$format> and size C<$size> KiB for a target
+C<$path>.
 
-C<$options> currently allows setting the C<preallocation> value
+C<$options> currently allows setting the C<preallocation> value.
 
 =cut
 
@@ -167,7 +169,7 @@ sub qemu_img_create {
     push @$cmd, '-o', "preallocation=$options->{preallocation}"
         if defined($options->{preallocation});
 
-    push @$cmd, '-f', $fmt, $path, "${size}K";
+    push @$cmd, '-f', $fmt, '--', $path, "${size}K";
 
     run_command($cmd, errmsg => "unable to create image");
 }
@@ -178,7 +180,8 @@ sub qemu_img_create {
 
     qemu_img_create_qcow2_backed($path, $backing_path, $backing_format, $options)
 
-Create a new qemu qcow2 image C<$path> using an existing backing image C<$backing_path> with backing_format C<$backing_format>.
+Create a new qemu qcow2 image C<$path> using an existing backing image C<$backing_path> with
+backing format C<$backing_format>.
 
 C<$options> currently allows setting the C<preallocation> value.
 
@@ -188,15 +191,8 @@ sub qemu_img_create_qcow2_backed {
     my ($path, $backing_path, $backing_format, $options) = @_;
 
     my $cmd = [
-        '/usr/bin/qemu-img',
-        'create',
-        '-F',
-        $backing_format,
-        '-b',
-        $backing_path,
-        '-f',
+        '/usr/bin/qemu-img', 'create', '-F', $backing_format, '-b', $backing_path, '-f',
         'qcow2',
-        $path,
     ];
 
     # TODO make this configurable for all volumes/types and pass in via $options
@@ -205,6 +201,8 @@ sub qemu_img_create_qcow2_backed {
     push @$opts, "preallocation=$options->{preallocation}"
         if defined($options->{preallocation});
     push @$cmd, '-o', join(',', @$opts) if @$opts > 0;
+
+    push @$cmd, '--', $path;
 
     run_command($cmd, errmsg => "unable to create image");
 }
@@ -215,18 +213,19 @@ sub qemu_img_create_qcow2_backed {
 
     qemu_img_info($filename, $file_format, $timeout, $follow_backing_files)
 
-Returns a json with qemu image C<$filename> informations with format <$file_format>.
-If C<$follow_backing_files> option is defined, return a json with the whole chain
-of backing files images.
+Returns a json with qemu image C<$filename> information with format <$file_format>. If
+C<$follow_backing_files> option is defined, return a json with the whole chain of backing files
+images.
 
 =cut
 
 sub qemu_img_info {
     my ($filename, $file_format, $timeout, $follow_backing_files) = @_;
 
-    my $cmd = ['/usr/bin/qemu-img', 'info', '--output=json', $filename];
+    my $cmd = ['/usr/bin/qemu-img', 'info', '--output=json'];
     push $cmd->@*, '-f', $file_format if $file_format;
     push $cmd->@*, '--backing-chain' if $follow_backing_files;
+    push $cmd->@*, '--', $filename;
 
     return run_qemu_img_json($cmd, $timeout);
 }
@@ -237,9 +236,11 @@ sub qemu_img_info {
 
     qemu_img_measure($size, $fmt, $timeout, $options)
 
-Returns a json with the maximum size including all metadatas overhead for an image with format C<$fmt> and original size C<$size>Kb.
+Returns a json with the maximum size including all metadata overhead for an image with format
+C<$fmt> and original size C<$size> KiB.
 
-C<$options> allows specifying qemu-img options that might affect the sizing calculation, such as cluster size.
+C<$options> allows specifying qemu-img options that might affect the sizing calculation, such as
+cluster size.
 
 =cut
 
@@ -261,9 +262,9 @@ sub qemu_img_measure {
 
     qemu_img_resize($path, $format, $size, $preallocation, $timeout)
 
-Resize a qemu image C<$path> with format C<$format> to a target Kb size C<$size>.
-Default timeout C<$timeout> is 10s if not specified.
-C<$preallocation> allows to specify the preallocation option for the resize operation.
+Resize a qemu image C<$path> with format C<$format> to a target size C<$size> in bytes.
+C<$preallocation> allows to specify the preallocation option for the resize operation. If no
+C<$timeout> is provided, it defaults to 10 seconds, or 1 hour when running in a worker context.
 
 =cut
 
@@ -274,9 +275,11 @@ sub qemu_img_resize {
 
     my $cmd = ['/usr/bin/qemu-img', 'resize'];
     push $cmd->@*, "--preallocation=$preallocation" if $preallocation;
-    push $cmd->@*, '-f', $format, $path, $size;
+    push $cmd->@*, '-f', $format, '--', $path, $size;
 
-    $timeout = 10 if !$timeout;
+    if (!$timeout) {
+        $timeout = PVE::RPCEnvironment->is_worker() ? 60 * 60 : 10;
+    }
     run_command($cmd, timeout => $timeout);
 }
 

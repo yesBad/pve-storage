@@ -27,6 +27,13 @@ use constant COMPRESSOR_RE => join('|', KNOWN_COMPRESSION_FORMATS);
 use constant LOG_EXT => ".log";
 use constant NOTES_EXT => ".notes";
 
+use constant FORMAT_EXTENSION => {
+    raw => 'raw',
+    qcow2 => 'qcow2',
+    vmdk => 'vmdk',
+    subvol => 'subvol',
+};
+
 our @COMMON_TAR_FLAGS = qw(
     --one-file-system
     -p --sparse --numeric-owner --acls
@@ -332,6 +339,11 @@ PVE::JSONSchema::register_format('pve-storage-vgname', \&parse_lvm_name);
 
 sub parse_lvm_name {
     my ($name, $noerr) = @_;
+
+    if (length($name) < 2) {
+        return undef if $noerr;
+        die "lvm name '$name' can't be shorter than 2 characters\n";
+    }
 
     if ($name !~ m/^[a-z0-9][a-z0-9\-\_\.]*[a-z0-9]$/i) {
         return undef if $noerr;
@@ -836,6 +848,99 @@ sub parse_volname {
     die "unable to parse directory volume name '$volname'\n";
 }
 
+=head3 get_parsed_format
+
+Return the disk format encoded in the given volume name, or C<undef> if the name does not spell one
+out. If a format is returned, the name must have been validated.
+
+This is an extension point for plugins whose volume names encode the format differently. ZFS
+derives it from the name prefix via C<parse_volname>, while LVM and RBD take it from a known file
+extension and treat a name without one as raw.
+
+returns: the format indicated by the name, if any.
+
+=cut
+
+sub get_parsed_format {
+    my ($class, $name) = @_;
+
+    return undef if $name !~ m/\.[^.]+$/; # no extension, so no format is spelled out
+
+    return (parse_name_dir($name))[1]; # dies for invalid volume file names
+}
+
+sub is_valid_format {
+    my ($class, $fmt) = @_;
+
+    return defined($class->FORMAT_EXTENSION->{$fmt});
+}
+
+=head3 volname_for_format
+
+Reconcile the requested format with the volume name and return the name to
+allocate.
+
+Dies immediately if C<$fmt> is not a valid format for this plugin.
+
+If the name already encodes the requested format, returns the name unchanged.
+
+If C<$strict> is true, any format mismatch dies with a suggestion for the
+corrected name.
+
+If C<$strict> is false (lax mode), a name without a file extension is adapted
+to the requested format and a warning is emitted; the adapted name is parsed
+like a given one, so it cannot bypass the volume name checks. A name that
+already carries a file extension dies with a suggestion, because the extension
+indicates an explicit format choice that contradicts the request.
+
+returns: the name to allocate
+
+=cut
+
+sub volname_for_format {
+    my ($class, $name, $fmt, $strict) = @_;
+
+    die "unsupported format '$fmt'\n" if !($class->is_valid_format($fmt));
+
+    my $parsed_volname_fmt = $class->get_parsed_format($name);
+
+    # Note that get_parsed_format() validates the name if it has a format extension.
+    return $name if defined($parsed_volname_fmt) && $parsed_volname_fmt eq $fmt;
+
+    my $suggestion = $class->volname_with_format($name, $fmt);
+
+    if ($strict || $name =~ /\.[^.]+$/) {
+        die "illegal name $name - volume name does not match requested format "
+            . "'$fmt' (did you mean '$suggestion'?)\n";
+    }
+
+    # the adapted name was never parsed, so validate it like a given one before it is used
+    my $suggestion_fmt = $class->get_parsed_format($suggestion);
+    die "illegal name '$name' - adapted name '$suggestion' is not a valid '$fmt' volume name\n"
+        if !defined($suggestion_fmt) || $suggestion_fmt ne $fmt;
+
+    warn "volume name '$name' is missing the '.$fmt' extension - allocating '$suggestion'\n";
+
+    return $suggestion;
+}
+
+sub get_format_extension {
+    my ($class, $fmt) = @_;
+
+    return $class->FORMAT_EXTENSION->{$fmt};
+}
+
+sub volname_with_format {
+    my ($class, $name, $fmt) = @_;
+
+    my $correct_fmt_ext = $class->get_format_extension($fmt);
+
+    $name =~ s/\.[^.]+$//;
+
+    return $name if !$correct_fmt_ext;
+    return "$name.$correct_fmt_ext";
+}
+
 my $vtype_subdirs = {
     images => 'images',
     rootdir => 'private',
@@ -1056,10 +1161,7 @@ sub alloc_image {
 
     $name = $class->find_free_diskname($storeid, $scfg, $vmid, $fmt, 1) if !$name;
 
-    my (undef, $tmpfmt) = parse_name_dir($name);
-
-    die "illegal name '$name' - wrong extension for format ('$tmpfmt != '$fmt')\n"
-        if $tmpfmt ne $fmt;
+    $name = $class->volname_for_format($name, $fmt, 0);
 
     my $path = "$imagedir/$name";
 
@@ -1161,9 +1263,9 @@ sub free_image {
     }
 
     # try to cleanup directory to not clutter storage with empty $vmid dirs if
-    # all images from a guest got deleted
-    my $dir = dirname($path);
-    rmdir($dir);
+    # all images from a guest got deleted, but keep the shared content type dirs
+    my ($vtype) = $class->parse_volname($volname);
+    rmdir(dirname($path)) if $vtype eq 'images';
 
     return undef;
 }
@@ -1373,7 +1475,7 @@ sub volume_resize {
     my $format = ($class->parse_volname($volname))[6];
 
     my $preallocation = preallocation_cmd_opt($scfg, $format);
-    PVE::Storage::Common::qemu_img_resize($path, $format, $size, $preallocation, 10);
+    PVE::Storage::Common::qemu_img_resize($path, $format, $size, $preallocation);
 
     return undef;
 }
@@ -1404,7 +1506,7 @@ sub volume_snapshot {
 
         my $path = $class->filesystem_path($scfg, $volname);
 
-        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-c', $snap, $path];
+        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-c', $snap, '--', $path];
 
         run_command($cmd);
     }
@@ -1468,7 +1570,7 @@ sub volume_snapshot_rollback {
         }
     } else {
         my $path = $class->filesystem_path($scfg, $volname);
-        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-a', $snap, $path];
+        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-a', $snap, '--', $path];
         run_command($cmd);
     }
 
@@ -1506,7 +1608,7 @@ sub volume_snapshot_delete {
         if (!$parentsnap) {
             print "$volname: deleting snapshot '$snap' by commiting snapshot '$childsnap'\n";
             print "running 'qemu-img commit $childpath'\n";
-            $cmd = ['/usr/bin/qemu-img', 'commit', $childpath];
+            $cmd = ['/usr/bin/qemu-img', 'commit', '--', $childpath];
             eval { run_command($cmd) };
             if ($@) {
                 warn
@@ -1532,6 +1634,7 @@ sub volume_snapshot_delete {
                 'qcow2',
                 '-f',
                 'qcow2',
+                '--',
                 $childpath,
             ];
             print "running '" . join(' ', $cmd->@*) . "'\n";
@@ -1554,7 +1657,7 @@ sub volume_snapshot_delete {
         my $path = $class->filesystem_path($scfg, $volname);
         $class->deactivate_volume($storeid, $scfg, $volname, $snap, {});
 
-        $cmd = ['/usr/bin/qemu-img', 'snapshot', '-d', $snap, $path];
+        $cmd = ['/usr/bin/qemu-img', 'snapshot', '-d', $snap, '--', $path];
         run_command($cmd);
     }
 
@@ -2210,11 +2313,10 @@ sub volume_export {
                     errfunc => sub { print STDERR "$_[0]\n" },
                 );
             } else {
+                my $bs = 64 * 1024;
+                # Note that there is no progress indication for 'qemu-img dd' at the moment.
                 run_command(
-                    [
-                        'qemu-img', 'convert', '-f', $file_format, '-O', 'raw', $file,
-                        '/dev/stdout',
-                    ],
+                    ['qemu-img', 'dd', "if=$file", "bs=$bs", '-f', $file_format, '-O', 'raw'],
                     output => '>&' . fileno($fh),
                 );
             }
@@ -2234,7 +2336,7 @@ sub volume_export {
             die $err_msg if $file_format ne 'subvol';
             write_common_header($fh, $size);
             run_command(
-                ['tar', @COMMON_TAR_FLAGS, '-cf', '-', '-C', $file, '.'],
+                ['tar', @COMMON_TAR_FLAGS, '-cf', '-', '-C', $file, '--', '.'],
                 output => '>&' . fileno($fh),
             );
             return;
@@ -2388,6 +2490,8 @@ sub rename_volume {
 
     $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format, 1)
         if !$target_volname;
+
+    $target_volname = $class->volname_for_format($target_volname, $format, 0);
 
     my $basedir = $class->get_subdir($scfg, 'images');
 
@@ -2575,8 +2679,9 @@ sub qemu_blockdev_options {
             } $rbd_options =~ /(?:\\:|\[[^\]]*\]|[^:\\])+/g
         };
 
-        $blockdev->{'auth-client-required'} = [$options->{'auth_supported'}]
-            if $options->{'auth_supported'};
+        # a hand-written path can still carry the 'auth_supported' that Ceph dropped in 19.2.6
+        my $auth_required = $options->{'auth_client_required'} // $options->{'auth_supported'};
+        $blockdev->{'auth-client-required'} = [$auth_required] if $auth_required;
         $blockdev->{'conf'} = $options->{'conf'} if $options->{'conf'};
         $blockdev->{'user'} = $options->{'id'} if $options->{'id'};
 
@@ -2601,7 +2706,7 @@ sub qemu_blockdev_options {
             }
         }
 
-        delete($options->@{qw(auth_supported conf id mon_host image)});
+        delete($options->@{qw(auth_client_required auth_supported conf id mon_host image)});
 
         # Map rest directly. With -drive, it was possible to use arbitrary key-value-pairs. Like
         # this, there will be warnings for those that are not allowed via blockdev.
